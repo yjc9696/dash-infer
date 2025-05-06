@@ -80,62 +80,47 @@ class Conversation:
 
     def get_content(self, content) -> Tuple:
         text_list = []
-        text_type = []
-        image_list = ["image"]
+        vision_type = "image"
+        image_list = [vision_type]
         text = ""
-
-        video_tokens = "<|vision_start|><|vision_end|>\n"
-        image_tokens = "<|vision_start|><|vision_end|>"
-
-        for i, item in enumerate(content):
+        for item in content:
             if "type" not in item:
-                image_list[0] = "video"
+                vision_type = "video"
+                image_list[0] = vision_type
                 if isinstance(item, str):
                     text_list.append(item)
-                    text_list.append("text")
                 elif isinstance(item, dict):
                     if item["image"].startswith("data:image"):
                         image_list.append(item["image"])
                     else:
                         image_list.append("data:image/jpg;base64," + item["image"])
-
-                    if i == 0 or text_type[i-1] != "video":
-                        text_list.append(video_tokens)
-                        text_type.append("video")
-                continue
-
-            if item["type"] == "video_url":
-                image_list[0] = "video"
+            elif item["type"] == "video_url":
+                vision_type = "video"
+                image_list[0] = vision_type
                 video_urls = item["video_url"]["url"]
-                image_list_len = len(image_list)
                 if isinstance(video_urls, str):
                     image_list.append(video_urls)
                 elif isinstance(video_urls, list):
                     for x in video_urls:
                         image_list.append(x)
-
-                if image_list_len != len(image_list):
-                    if i == 0 or text_type[i-1] != "video":
-                        text_list.append(video_tokens)
-                        text_type.append("video")
-                    
                 if "fps" in item["video_url"].keys():
                     self.fps.append(item["video_url"]["fps"])
                 else:
                     self.fps.append(1)
-                continue
-            
-            if item["type"] == "image_url":
+            elif item["type"] == "image_url":
                 image_list.append(item["image_url"]["url"])
-                text_list.append(image_tokens)
-                text_type.append("image")
-                continue
-
-            if item["type"] == "text":
+            elif item["type"] == "text":
                 text_list.append(item["text"])
-                text_type.append("text")
-                continue
 
+        if len(image_list) == 1:
+            image_list = []
+        else:
+            if image_list[0] == "image":
+                text = "<|vision_start|><|vision_end|>" * (len(image_list) - 1)
+            elif image_list[0] == "video":
+                text = "<|vision_start|><|vision_end|>\n"
+            else:
+                raise ValueError(f"Unkown vision_type: {image_list[0]}")
         text += "".join(text_list)
         return (text, image_list)
 
@@ -162,12 +147,9 @@ class Conversation:
 
     def get_prompt(self) -> str:
         """Get the prompt for generation."""
-
-        system_prompt = ""
-        system_message = self.get_system_message()
-        if len(system_message) > 0:
-            system_prompt = self.system_template.format(system_message=system_message)
-
+        system_prompt = self.system_template.format(
+            system_message=self.get_system_message()
+        )
         if self.sep_style == SeparatorStyle.ADD_COLON_SINGLE:
             ret = system_prompt + self.sep
             for role, message in self.messages:
@@ -528,8 +510,10 @@ class Conversation:
 
     def get_system_message(self, is_vision=False):
         """return the system message."""
-        if is_vision:
+        if is_vision and self.system_message_vision:
             return self.system_message_vision
+        if self.system_message == "":
+            return "You are a helpful assistant."
         return self.system_message
 
     def append_message(self, role: str, message: str):
