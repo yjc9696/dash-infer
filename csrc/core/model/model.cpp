@@ -846,7 +846,6 @@ AsStatus AsModel::StartRequest(std::shared_ptr<Request> request) {
           gen_ctx->request->prefix_cache_node_list);
     }
   }
-#endif
 
   if (cache_frame_manager_ != nullptr) {
     LOG(INFO) << "cache_frame_manager_->CountFreeFrame(): "
@@ -855,6 +854,7 @@ AsStatus AsModel::StartRequest(std::shared_ptr<Request> request) {
               << cache_frame_manager_->CountPresFrame() << ", "
               << "rank_id: " << rank_;
   }
+#endif
 
   // context阶段成功结束
   request->status = AsEngine::GenerateRequestStatus::ContextFinished;
@@ -1007,6 +1007,7 @@ AsStatus AsModel::StopRequest(const std::string& request_id) {
               << "Prefix Cache Len: " << request->prefix_len;
   }
 
+#if ENABLE_SPAN_ATTENTION1
   if (cache_frame_manager_ != nullptr) {
     LOG(INFO) << "cache_frame_manager_->CountFreeFrame(): "
               << cache_frame_manager_->CountFreeFrame() << ", "
@@ -1014,7 +1015,7 @@ AsStatus AsModel::StopRequest(const std::string& request_id) {
               << cache_frame_manager_->CountPresFrame() << ", "
               << "rank_id: " << rank_;
   }
-
+#endif
   return AsStatus::ALLSPARK_SUCCESS;
 }
 

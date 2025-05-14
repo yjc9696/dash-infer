@@ -1,30 +1,20 @@
-name: Release Packages
+name: Build Check
 # docker download mirror should setup in self host machine.
 # the mirror status can be found at : https://status.daocloud.io/status/docker
 on:
-  push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
-  workflow_dispatch:
-
-# Needed to create release and upload assets
-permissions:
-  contents: write
+  pull_request:
+  merge_group:
 
 jobs:
   build-tgz:
     strategy:
       matrix:
-        arch: [X64, ARM64]
-        image: ["dev-centos7-cu124:v1", "dev-centos8-arm:v2"]
+        arch: [X64]
+        image: ["dev-centos7-cu124:v1"]
         enable_cuda: [0, 1]
         exclude:
           - arch: X64
             image: "dev-centos8-arm:v2"
-          - arch: ARM64
-            image: "dev-centos7-cu124:v1"
-          - arch: ARM64
-            enable_cuda: 1
     runs-on: [self-hosted, Linux, "${{ matrix.arch }}"]
     container:
       image: dashinfer/${{ matrix.image }}
@@ -66,7 +56,6 @@ jobs:
         VERSION_NUMBER=$(echo "$TAG_NAME" | sed 's/^v//')
 
         export AS_RELEASE_VERSION=$VERSION_NUMBER
-        export AS_BUILD_PACKAGE=ON
 
         echo "ENABLE_CUDA value: $ENABLE_CUDA"
 
@@ -86,26 +75,13 @@ jobs:
             fi
         fi
 
-    - name: Upload tgz package
-      uses: actions/upload-artifact@v4
-      with:
-        name: dashinfer-tgz-${{ matrix.arch }}-${{ matrix.enable_cuda }}
-        path: build/*.tar.gz
-
 
   build-wheels:
     strategy:
       matrix:
-        arch: [X64, ARM64]
-        image: ["dev-centos7-cu124:v1", "dev-centos8-arm:v2"]
+        arch: [X64]
+        image: ["dev-centos7-cu124:v1"]
         enable_cuda: [0, 1]
-        exclude:
-          - arch: X64
-            image: "dev-centos8-arm:v2"
-          - arch: ARM64
-            image: "dev-centos7-cu124:v1"
-          - arch: ARM64
-            enable_cuda: 1
     runs-on: [self-hosted, Linux, "${{ matrix.arch }}"]
     container:
       image: dashinfer/${{ matrix.image }}
@@ -158,37 +134,3 @@ jobs:
               bash scripts/release/python_manylinux_build.sh
             fi
         fi
-
-    - name: Upload wheels
-      uses: actions/upload-artifact@v4
-      with:
-        name: python-manylinux-wheels-${{ matrix.arch }}-${{ matrix.enable_cuda }}
-        path: python/wheelhouse/*-manylinux*.whl
-
-  publish:
-    runs-on: [self-hosted, Linux]
-    needs: [build-tgz, build-wheels]
-    strategy:
-      matrix:
-        arch: [X64, ARM64]
-        enable_cuda: [0, 1]
-        exclude:
-          - arch: ARM64
-            enable_cuda: 1
-    steps:
-    - name: Download tgz packages
-      uses: actions/download-artifact@v4
-      with:
-        name: dashinfer-tgz-${{ matrix.arch }}-${{ matrix.enable_cuda }}
-        path: release/
-
-    - name: Download python wheels
-      uses: actions/download-artifact@v4
-      with:
-        name: python-manylinux-wheels-${{ matrix.arch }}-${{ matrix.enable_cuda }}
-        path: release/
-
-    - name: Release all packages
-      uses: softprops/action-gh-release@v1
-      with:
-        files: release/*
