@@ -29,6 +29,7 @@ class EngineUtils:
             "Qwen_v30": Qwen_v30,
             "QwenCode_v20": QwenCode_v20,
             "Qwen_v20_MOE":Qwen_v20_MOE,
+            "Qwen_v30_MOE":Qwen_v30_MOE,
         }
 
         self.version = ""

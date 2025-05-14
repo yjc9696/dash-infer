@@ -54,4 +54,9 @@ class QwenModel_v20_MOE : public QwenModel {
   explicit QwenModel_v20_MOE(const std::string& model_type = "")
       : QwenModel(model_type){};
 };
+class QwenModel_v30_MOE : public QwenModel {
+ public:
+  explicit QwenModel_v30_MOE(const std::string& model_type = "")
+      : QwenModel(model_type){};
+};
 }  // namespace allspark

@@ -2,7 +2,7 @@
  Copyright (c) Alibaba, Inc. and its affiliates.
  @file    model_config.py
 '''
-from transformers import Qwen2Config, Qwen2MoeConfig, LlamaConfig
+from transformers import Qwen2Config, Qwen2MoeConfig, Qwen3Config, Qwen3MoeConfig,LlamaConfig
 
 import torch
 
@@ -96,7 +96,7 @@ class QWen2ConfigAdapter(ModelConfigAdapter):
         return self.model_dtype
 
 class QWen3ConfigAdapter(ModelConfigAdapter):
-    def __init__(self, hf_model_config: Qwen2Config):
+    def __init__(self, hf_model_config: Qwen3Config):
         self.model_config = hf_model_config.__dict__
         self.model_config["model_type"] = "Qwen_v30"
         self.model_config["architectures"] = hf_model_config.architectures
@@ -148,7 +148,31 @@ class Qwen2MoeConfigAdapter(ModelConfigAdapter):
 
     def get_model_data_type(self):
         return self.model_dtype
+class Qwen3MoeConfigAdapter(ModelConfigAdapter):
+    def __init__(self, hf_model_config: Qwen3MoeConfig):
+        self.model_config = hf_model_config.__dict__
+        self.model_config["model_type"] = "Qwen_v30_MOE"
 
+        self.model_config["rotary_emb_base"] = hf_model_config.rope_theta
+        self.model_config["use_ep"] = True
+        hidden_size_per_head = int(
+            hf_model_config.hidden_size / hf_model_config.num_attention_heads
+        )
+
+        self.model_config["size_per_head"] = hidden_size_per_head
+
+        self.model_dtype = torch_dtype_to_as_dtype(hf_model_config.torch_dtype)
+        if self.model_dtype == None:
+            print(
+                "config.json not setup data type correctly, use bfloat16 as model data type"
+            )
+            self.model_dtype = "bfloat16"
+
+        print("Qwen_v30_MOE model config:")
+        print(self.model_config)
+
+    def get_model_data_type(self):
+        return self.model_dtype
 
 class LlamaConfigAdapter(ModelConfigAdapter):
     def __init__(self, hf_model_config: LlamaConfig):
@@ -220,6 +244,7 @@ class ModelAdapterFactory:
             "Qwen2Config": QWen2ConfigAdapter,
             "Qwen3Config": QWen3ConfigAdapter,
             "Qwen2MoeConfig": Qwen2MoeConfigAdapter,
+            "Qwen3MoeConfig": Qwen3MoeConfigAdapter,
             "Qwen2VLForConditionalGeneration": QWen2ConfigAdapter,
             "LlamaConfig": LlamaConfigAdapter,
             "ChatGLMConfig": ChatGLMConfigAdapter,

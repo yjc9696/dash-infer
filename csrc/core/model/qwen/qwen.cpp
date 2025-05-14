@@ -29,4 +29,5 @@ REGISTER_MODEL("Qwen_v20", QwenModel_v20)
 REGISTER_MODEL("Qwen_v30", QwenModel_v30)
 REGISTER_MODEL("QwenCode_v20", QwenCodeModel_v20)
 REGISTER_MODEL("Qwen_v20_MOE", QwenModel_v20_MOE)
+REGISTER_MODEL("Qwen_v30_MOE", QwenModel_v30_MOE)
 }  // namespace allspark

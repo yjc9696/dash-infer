@@ -1,6 +1,6 @@
 '''
  Copyright (c) Alibaba, Inc. and its affiliates.
- @file    qwen_v30.py
+ @file    qwen_v30_moe.py
 '''
 from .model_base import *
 from .utils import WeightNameAdapter
@@ -8,10 +8,10 @@ from ..quantization import *
 from .quantization_utils import *
 
 
-class Qwen_v30(Model):
+class Qwen_v30_MOE(Model):
 
     def __init__(self, torch_model, data_type, derive_type, **kwargs):
-        super().__init__("Qwen_v30", data_type, **kwargs)
+        super().__init__("Qwen_v30_MOE", data_type, **kwargs)
         self.model.inputs.append(
             make_tensor("input_ids", np.empty(shape=(0, 0), dtype=np.int64)))
         self.model.inputs.append(
@@ -19,6 +19,7 @@ class Qwen_v30(Model):
                                                    dtype=np.int64)))
         self.model.outputs.append(make_tensor("last_hidden_state"))
         self.is_generate = kwargs.get('is_generate', True)
+        self._merge_gate_proj(torch_model)
         self.weight_real_names = set()
         self.covert_namespace_qweight_to_weight(torch_model)
         for v in torch_model:
@@ -29,7 +30,18 @@ class Qwen_v30(Model):
             self._trans_weight(torch_model)
         self._trans_lora_weight(self._trans_weight)
         print("parse weight time: ", time.time() - start_time)
-
+    def _merge_gate_proj(self, torch_model):
+        new_model = {}
+        for key, val in torch_model.items():
+            # print(key, val.size())
+            if (key.find("gate_proj.weight") != -1 and key.find("experts.") != -1):
+                # for moe
+                up_proj_key = key.replace("gate_proj", "up_proj")
+                up_proj_val = torch_model[up_proj_key]
+                new_key = key.replace("gate_proj", "gate_up_proj")
+                tensor = torch.concat([val,up_proj_val]).cpu()
+                new_model[new_key] = tensor
+        torch_model.update(new_model)
     def _build_graph(self, torch_cfg, derive_type):
         cfg = self.model.model_conf
         cfg.dtype = self.dtype
@@ -39,11 +51,16 @@ class Qwen_v30(Model):
         cfg.multi_query_group_num = torch_cfg.get('num_key_value_heads', 0)
         if (cfg.multi_query_group_num == 0):
             cfg.multi_query_group_num = cfg.num_heads
+        cfg.num_experts = torch_cfg.get('num_experts', 128)
+        cfg.num_experts_per_tok = torch_cfg.get('num_experts_per_tok', 4)
         cfg.dec_layer = torch_cfg.get('num_hidden_layers', 12)
+        # cfg.head_dim = int(hidden_size_ / cfg.num_heads)
+        
         cfg.activation = get_activation(torch_cfg.get('hidden_act', "silu"))
         cfg.size_per_head = torch_cfg.get('head_dim', 128)
         cfg.intermediate_size = torch_cfg.get('intermediate_size', 0)
         cfg.is_generate = self.is_generate
+        self.use_ep = torch_cfg.get('use_ep', False)
         rope_scaling = torch_cfg.get('rope_scaling',{})
         if rope_scaling is None:
             rope_scaling = {}
@@ -62,12 +79,12 @@ class Qwen_v30(Model):
             "o_proj.weight",
             "input_layernorm.weight",  #7
             "post_attention_layernorm.weight",  #8
-            "mlp.gate_proj.weight",
-            "mlp.up_proj.weight",
-            "mlp.down_proj.weight",
-            "rotary_emb.inv_freq",  #12
-            "q_norm.weight",  #13
-            "k_norm.weight",
+            "q_norm.weight",  #9
+            "k_norm.weight",  #10
+            "mlp.gate.weight", #11
+            # "mlp.gate_proj.weight", #11
+            # "mlp.up_proj.weight",#12
+            # "mlp.down_proj.weight",#13
         ]
 
         self.name_adapter = WeightNameAdapter(weight_std_names,
@@ -91,24 +108,22 @@ class Qwen_v30(Model):
             weight_std_names[7],
             "attention.self.weight":
             [weight_std_names[3], weight_std_names[4], weight_std_names[5]],
-            # "attention.self.bias":
-            # [weight_std_names[13], weight_std_names[14], weight_std_names[15]],
             "attention.output.dense.weight":
             weight_std_names[6],
             "ffn.layernorm.gamma":
             weight_std_names[8],
-            "ffn.intermediate.dense.weight":
-            weight_std_names[9],
-            "ffn.linear.dense.weight":
-            weight_std_names[10],
-            "ffn.output.dense.weight":
-            weight_std_names[11],
-            "rotary.inv_freq":
-            weight_std_names[12],
             "attention.qknorm.q_norm.gamma":
-            weight_std_names[13],
+            weight_std_names[9],
             "attention.qknorm.k_norm.gamma":
-            weight_std_names[14],
+            weight_std_names[10],
+            "mlp.gate.weight":
+            weight_std_names[11],
+            # "shared_expert_gate.weight":
+            # weight_std_names[11],
+            # "shared_expert.gate_up_proj.weight":
+            # weight_std_names[12],
+            # "shared_expert.down_proj.weight":
+            # weight_std_names[13],
                 
         }
         for i in range(cfg.dec_layer):
@@ -124,6 +139,21 @@ class Qwen_v30(Model):
                         self.weight_name_map["decoder.layer.{}.{}".format(
                             i, key)] = self.name_adapter.fullname(
                                 real_name).format(i)
+        moe_name_map = {
+            # "gate_proj.weight":"gate_proj.weight",
+            # "up_proj.weight":"up_proj.weight",
+            "gate_up_proj.weight":"gate_up_proj.weight",
+            "down_proj.weight":"down_proj.weight",
+        }
+        for i in range(cfg.dec_layer):
+            for key in moe_name_map:
+                expert_name = "decoder.layer.{}.mlp.experts.{}".format(i,key)
+                self.weight_name_map[expert_name] = ["model.layers.{}.mlp.experts.{}.{}".format(i, j, key) for j in range(cfg.num_experts)]
+                # for j in range(cfg.num_experts):
+                #         # as_name = "decoder.layer.{}.mlp.experts.{}.{}".format(i, j, key)
+                #         torch_name = "model.layers.{}.mlp.experts.{}.{}".format(i, j, key)
+                #         self.weight_name_map[expert_name].append = torch_name
+                
         if self.multigpu_mode != 0:
             self.split_map = {}
             self.split_map["embedding.word_embeddings"] = VSPLIT
@@ -139,10 +169,12 @@ class Qwen_v30(Model):
                                    "attention.self.bias"] = GROUP_VSPLIT
                 self.split_map[prefix +
                                "attention.output.dense.weight"] = HSPLIT
-                self.split_map[prefix +
-                               "ffn.intermediate.dense.weight"] = VSPLIT
-                self.split_map[prefix + "ffn.linear.dense.weight"] = VSPLIT
-                self.split_map[prefix + "ffn.output.dense.weight"] = HSPLIT
+                if self.use_ep:
+                    self.split_map[prefix + "mlp.experts.gate_up_proj.weight"] = EPSPLIT
+                    self.split_map[prefix + "mlp.experts.down_proj.weight"] = EPSPLIT
+                else:
+                    self.split_map[prefix + "mlp.experts.gate_up_proj.weight"] = BATCH_KVSPLIT
+                    self.split_map[prefix + "mlp.experts.down_proj.weight"] = BATCH_HSPLIT
         if self.do_dynamic_quantize_convert is True:
             if self.quant_config != None:
                 print(self.quant_config.quantize_mode)
@@ -164,6 +196,10 @@ class Qwen_v30(Model):
                                           "ffn.linear.dense.weight"] = 1
                         self.quantize_map[prefix +
                                           "ffn.output.dense.weight"] = 1
+                        self.quantize_map[prefix +
+                                          "mlp.experts.gate_up_proj.weight"] = 1
+                        self.quantize_map[prefix +
+                                          "mlp.experts.down_proj.weight"] = 1
                 else:
                     raise RuntimeError(
                         "quantize mode {} is not supported.".format(
@@ -286,106 +322,59 @@ class Qwen_v30(Model):
             attn_op_list = []
             ffn_op_list = []
             ffn_ln = None
-            if do_binary_add_fused:
-                attn_out_gemm = self.make_gemm_op(
-                    prefix + "attention.output.dense",
-                    [attn.outputs[0], graph.ops[-1].outputs[0]], {
-                        "with_bias": False,
-                        "binary_type": ADD
-                    })()
-                attn_op_list = [
-                    first_ln, attn_self_gemm, qk_norm,rotary_embedding, attn,
-                    attn_out_gemm
-                ]
-                # ffn
-                ffn_ln = LayerNormNoBeta(prefix + "ffn.layernorm",
-                                         attn_out_gemm.outputs[0],
-                                         {"eps": cfg.ln_eps})()
-            else:
-                attn_out_gemm = self.make_gemm_op(
-                    prefix + "attention.output.dense", attn.outputs[0], {
-                        "with_bias": False,
-                        
-                    })()
-                attn_add = Binary(
-                    prefix + "attention_add",
-                    [attn_out_gemm.outputs[0], graph.ops[-1].outputs[0]],
-                    {"binary_type": ADD},
-                )()
-                attn_op_list = [
-                    first_ln, attn_self_gemm, qk_norm, rotary_embedding, attn,
-                    attn_out_gemm, attn_add
-                ]
-                # ffn
-                ffn_ln = LayerNormNoBeta(prefix + "ffn.layernorm",
-                                         attn_add.outputs[0],
-                                         {"eps": cfg.ln_eps})()
-            ffn_intermediate = self.make_gemm_op(
-                prefix + "ffn.intermediate.dense",
-                ffn_ln.outputs[0],
-                {
-                    "activation": cfg.activation,
+            attn_out_gemm = self.make_gemm_op(
+                prefix + "attention.output.dense", attn.outputs[0], {
                     "with_bias": False,
                     
-                },
+                })()
+            
+            all_reduce_attention = AllReduce(
+                    prefix + "attention.all_reduce_attention",
+                    attn_out_gemm.outputs[0])()
+            attn_add = Binary(
+                prefix + "attention_add",
+                [all_reduce_attention.outputs[0], graph.ops[-1].outputs[0]],
+                {"binary_type": ADD},
             )()
-            ffn_linear = self.make_gemm_op(
-                prefix + "ffn.linear.dense",
-                ffn_ln.outputs[0],
+            attn_op_list = [
+                first_ln, attn_self_gemm, qk_norm, rotary_embedding, attn,
+                attn_out_gemm, all_reduce_attention, attn_add
+            ]
+            attn_out = attn_add 
+            # ffn
+            ffn_ln = LayerNormNoBeta(prefix + "ffn.layernorm",
+                                        attn_add.outputs[0],
+                                        {"eps": cfg.ln_eps})()
+            ffn_input = ffn_ln.outputs[0]
+            mlp_gate = self.make_gemm_op(
+                prefix + "mlp.gate",
+                ffn_input,
                 {
                     "with_bias": False,
                     
                 },
             )()
-            ffn_mul = Binary(
-                prefix + "ffn.mul",
-                [ffn_intermediate.outputs[0], ffn_linear.outputs[0]],
-                {"binary_type": MUL},
+            mlp_moe = MOE(
+                prefix + "mlp.experts",
+                [ffn_input,mlp_gate.outputs[0]],
+                {
+                    "num_experts":cfg.num_experts,
+                    "num_experts_per_tok":cfg.num_experts_per_tok,
+                    "use_ep":self.use_ep
+                }
             )()
-            if do_binary_add_fused:
-                ffn_out = self.make_gemm_op(
-                    prefix + "ffn.output.dense",
-                    [ffn_mul.outputs[0], attn_out_gemm.outputs[0]], {
-                        "binary_type": ADD,
-                        "with_bias": False,
-                        
-                    })()
-                ffn_op_list = [
-                    ffn_ln, ffn_intermediate, ffn_linear, ffn_mul, ffn_out
-                ]
-                if self.multigpu_mode != 0:
-                    all_reduce_attention = AllReduce(
-                        prefix + "attention.all_reduce_attention",
-                        attn_out_gemm.outputs[0])()
-                    all_reduce_ffn = AllReduce(
-                        prefix + "attention.all_reduce_ffn",
-                        ffn_out.outputs[0])()
-                    attn_op_list.append(all_reduce_attention)
-                    ffn_op_list.append(all_reduce_ffn)
-            else:
-                ffn_out = self.make_gemm_op(
-                    prefix + "ffn.output.dense", ffn_mul.outputs[0], {
-                        "with_bias": False,
-                        
-                    })()
-                final_add = Binary(
-                    prefix + "final_add",
-                    [ffn_out.outputs[0], attn_add.outputs[0]],
-                    {"binary_type": ADD},
-                )()
-                ffn_op_list = [
-                    ffn_ln, ffn_intermediate, ffn_linear, ffn_mul, ffn_out,
-                    final_add
-                ]
-                if self.multigpu_mode != 0:
-                    all_reduce_attention = AllReduce(
-                        prefix + "attention.all_reduce_attention",
-                        attn_out_gemm.outputs[0])()
-                    all_reduce_ffn = AllReduce(
-                        prefix + "attention.all_reduce_ffn",
-                        ffn_out.outputs[0])()
-                    attn_op_list.insert(-1, all_reduce_attention)
-                    ffn_op_list.insert(-1, all_reduce_ffn)
+            
+            all_reduce_moe = AllReduce(
+                    prefix + "attention.all_reduce_moe",
+                    mlp_moe.outputs[0])()
+            final_add = Binary(
+                prefix + "final_add",
+                [all_reduce_moe.outputs[0], attn_out.outputs[0]],
+                {"binary_type": ADD},
+            )()
+            ffn_op_list = [
+                ffn_ln, mlp_gate, mlp_moe, all_reduce_moe, final_add
+            ]
             # final
             graph.ops.extend(attn_op_list + ffn_op_list)
 
@@ -501,12 +490,18 @@ class Qwen_v30(Model):
         ][0]
         for key, torch_name in weight_name_map.items():
             if isinstance(torch_name, list):  # attention qkv weights
-                tensor = (torch.concat(
-                    [torch_weight[name] for name in torch_name]).cpu())
+                if "experts" in key:
+                    tensor = (torch.stack(
+                        [torch.permute(torch_weight[name], (1, 0)).contiguous() for name in torch_name]).cpu())
+                else: # attention qkv weights
+                    tensor = (torch.concat(
+                        [torch_weight[name] for name in torch_name]).cpu())
+                    if key.find("weight") != -1:
+                        tensor = torch.permute(tensor, (1, 0)).contiguous()
             else:
                 tensor = torch_weight[torch_name].cpu()
-            if key.find("weight") != -1:
-                tensor = torch.permute(tensor, (1, 0)).contiguous()
+                if key.find("weight") != -1:
+                    tensor = torch.permute(tensor, (1, 0)).contiguous()
             self.validate_weight_dtype(key, tensor, self_dtype_str)
             mode = DENSE if key not in sparse_map else sparse_map[key]
             split_mode = NOSPLIT if key not in split_map else split_map[key]
